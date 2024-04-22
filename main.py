@@ -1,6 +1,34 @@
 import json
 import rerun as rr
 
+from confluent_kafka import Consumer, KafkaError, KafkaException
+
+from minio import Minio
+from PIL import Image
+import numpy as np
+from io import BytesIO
+
+minio_cli = Minio(
+        "192.168.0.110:8000",
+        access_key="root",
+        secret_key="root123123",
+        secure=False 
+)
+
+
+# Kafka consumer configuration
+conf = {
+    'bootstrap.servers': '192.168.0.171:31092',   
+    'group.id': 'predictions',                    
+    'auto.offset.reset': 'earliest'               
+}
+
+# Create Kafka consumer
+consumer = Consumer(conf)
+
+# Subscribe to the 'predictions' topic
+consumer.subscribe(['predictions'])
+
 def objects_to_rerun(json_data) -> rr.Boxes2D:
     boxes = []
     labels = []
@@ -40,24 +68,25 @@ def lines_to_rerun(json_data) -> rr.LineStrips2D:
     return rr.LineStrips2D(lines, labels=line_ids)
 
 
+def load_image_from_minio(minio_client, bucket_name, object_name):
+    image_object = minio_client.get_object(bucket_name, object_name)
+    image_data = image_object.read()
+    image_pil = Image.open(BytesIO(image_data))
+    image_np = np.array(image_pil)
+    
+    return image_np
+
+
+def images_to_rerun(json_data):
+    bucket_name = "frames"
+    object_name = json_data["video_frame"]["id"]
+    image = load_image_from_minio(minio_cli, bucket_name, object_name)
+
+    return rr.Image(image)
+
 
 rr.init("rerun_example_box2d", spawn=True)
 
-
-from confluent_kafka import Consumer, KafkaError, KafkaException
-
-# Kafka consumer configuration
-conf = {
-    'bootstrap.servers': '192.168.0.171:31092',     # Kafka broker address
-    'group.id': 'predictions',                      # Consumer group ID
-    'auto.offset.reset': 'earliest'                 # Start reading at the beginning of the topic
-}
-
-# Create Kafka consumer
-consumer = Consumer(conf)
-
-# Subscribe to the 'predictions' topic
-consumer.subscribe(['predictions'])
 
 try:
     while True:
@@ -79,10 +108,12 @@ try:
             objs = objects_to_rerun(pred)
             zns = zones_to_rerun(pred)
             lns = lines_to_rerun(pred)
+            img = images_to_rerun(pred)
 
             rr.log("object_detection/bbox", objs)
             rr.log("object_detection/zones", zns)
             rr.log("object_detection/lines", lns)
+            rr.log("object_detection/images", img)
 
 except KeyboardInterrupt:
     pass
